@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from app.services.audit import write_audit
 from app.services.auth import Principal, ensure_client_scope, get_principal, require_role
@@ -15,8 +15,8 @@ router = APIRouter(prefix="/v1", tags=["control-plane"])
 
 class ClientRegistrationRequest(BaseModel):
     org_name: str = Field(min_length=2)
-    contact_email: str
-    room_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,64}$")
+    contact_email: EmailStr
+    room_id: str = Field(pattern=r"^[a-z0-9-]{3,64}$")
     room_password: str = Field(min_length=8, max_length=256)
 
 
@@ -35,7 +35,7 @@ class DomainTrustRequest(BaseModel):
 
 
 class CreateRoomRequest(BaseModel):
-    room_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,64}$")
+    room_id: str = Field(pattern=r"^[a-z0-9-]{3,64}$")
 
 
 class SocketAuthorizeRequest(BaseModel):
@@ -53,9 +53,10 @@ ALLOWED_CONFIG_KEYS = {
 
 
 @router.post("/client-registrations")
-def create_registration(payload: ClientRegistrationRequest, principal: Principal = Depends(get_principal)) -> dict[str, Any]:
+def create_registration(payload: ClientRegistrationRequest) -> dict[str, Any]:
     reg_id = str(uuid.uuid4())
     now = utc_now()
+    normalized_room_id = payload.room_id.strip().lower()
     salt = uuid.uuid4().hex[:32]
     room_secret_hash = hash_secret(payload.room_password, salt)
     with get_conn() as conn:
@@ -64,18 +65,28 @@ def create_registration(payload: ClientRegistrationRequest, principal: Principal
             (
                 reg_id,
                 payload.org_name,
-                payload.contact_email,
-                payload.room_id,
+                str(payload.contact_email),
+                normalized_room_id,
                 salt,
                 room_secret_hash,
                 "pending",
-                principal.sub,
+                "self_service",
                 now,
                 now,
             ),
         )
-    write_audit(principal, "client_registration_created", "client_registration", reg_id, payload.model_dump())
-    return {"id": reg_id, "status": "pending", "room_id": payload.room_id}
+    write_audit(
+        None,
+        "client_registration_created",
+        "client_registration",
+        reg_id,
+        {
+            "org_name": payload.org_name,
+            "contact_email": str(payload.contact_email),
+            "room_id": normalized_room_id,
+        },
+    )
+    return {"id": reg_id, "status": "pending", "room_id": normalized_room_id}
 
 
 @router.post("/client-registrations/{registration_id}/approve")
@@ -213,6 +224,21 @@ def get_audit_logs(limit: int = 100, principal: Principal = Depends(get_principa
     return {"items": [dict(r) for r in rows]}
 
 
+@router.get("/admin/client-registrations/pending")
+def list_pending_registrations(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
+    require_role(principal, {"platform_admin"})
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, org_name, contact_email, requested_room_id, requested_by, created_at, updated_at
+            FROM client_registrations
+            WHERE status='pending'
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+    return {"items": [dict(r) for r in rows]}
+
+
 @router.get("/client/rooms")
 def list_client_rooms(principal: Principal = Depends(get_principal)) -> dict[str, Any]:
     require_role(principal, {"platform_admin", "client_admin", "client_operator", "client_viewer"})
@@ -237,17 +263,24 @@ def create_client_room(payload: CreateRoomRequest, principal: Principal = Depend
     if not client_id:
         raise HTTPException(status_code=400, detail="client_id missing")
 
+    normalized_room_id = payload.room_id.strip().lower()
     now = utc_now()
     secret, salt, secret_hash = issue_room_secret()
     with get_conn() as conn:
-        conn.execute("INSERT INTO rooms (room_id, client_id, created_at) VALUES (?, ?, ?)", (payload.room_id, client_id, now))
+        conn.execute("INSERT INTO rooms (room_id, client_id, created_at) VALUES (?, ?, ?)", (normalized_room_id, client_id, now))
         conn.execute(
             "INSERT INTO room_credentials (id, room_id, salt, secret_hash, active, rotated_at) VALUES (?, ?, ?, ?, 1, ?)",
-            (str(uuid.uuid4()), payload.room_id, salt, secret_hash, now),
+            (str(uuid.uuid4()), normalized_room_id, salt, secret_hash, now),
         )
 
-    write_audit(principal, "room_created", "room", payload.room_id, payload.model_dump())
-    return {"room_id": payload.room_id, "client_id": client_id, "room_secret": secret}
+    write_audit(
+        principal,
+        "room_created",
+        "room",
+        normalized_room_id,
+        {"room_id": normalized_room_id},
+    )
+    return {"room_id": normalized_room_id, "client_id": client_id, "room_secret": secret}
 
 
 @router.post("/client/rooms/{room_id}/credentials/rotate")
