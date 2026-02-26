@@ -28,6 +28,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8010
 
 - `POST /v1/client-registrations`
 - `POST /v1/client-registrations/{id}/approve`
+- `GET /v1/admin/client-registrations/pending`
 - `GET /v1/admin/system-overview`
 - `GET /v1/admin/config`
 - `PATCH /v1/admin/config`
