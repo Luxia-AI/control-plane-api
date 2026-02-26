@@ -38,6 +38,9 @@ def init_db() -> None:
                 id TEXT PRIMARY KEY,
                 org_name TEXT NOT NULL,
                 contact_email TEXT NOT NULL,
+                requested_room_id TEXT,
+                requested_room_salt TEXT,
+                requested_room_secret_hash TEXT,
                 status TEXT NOT NULL,
                 requested_by TEXT,
                 created_at TEXT NOT NULL,
@@ -96,6 +99,16 @@ def init_db() -> None:
             );
             """
         )
+        # Backward-compatible migrations for already-created local DBs.
+        for stmt in (
+            "ALTER TABLE client_registrations ADD COLUMN requested_room_id TEXT",
+            "ALTER TABLE client_registrations ADD COLUMN requested_room_salt TEXT",
+            "ALTER TABLE client_registrations ADD COLUMN requested_room_secret_hash TEXT",
+        ):
+            try:
+                conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
 
 
 def hash_secret(secret: str, salt: str) -> str:

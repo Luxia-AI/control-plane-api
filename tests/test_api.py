@@ -20,7 +20,12 @@ def test_registration_and_approval_flow(monkeypatch, tmp_path):
 
     reg = client.post(
         "/v1/client-registrations",
-        json={"org_name": "Demo Org", "contact_email": "demo@example.com"},
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo@example.com",
+            "room_id": "room_demo",
+            "room_password": "ChangeMe123!",
+        },
         headers=_headers("admin-token"),
     )
     assert reg.status_code == 200
@@ -28,7 +33,7 @@ def test_registration_and_approval_flow(monkeypatch, tmp_path):
 
     approved = client.post(
         f"/v1/client-registrations/{reg_id}/approve",
-        json={"client_id": "client_demo", "initial_room_id": "room_demo"},
+        json={"client_id": "client_demo"},
         headers=_headers("admin-token"),
     )
     assert approved.status_code == 200
@@ -41,13 +46,18 @@ def test_socket_authorization(monkeypatch, tmp_path):
     client = TestClient(app)
     reg = client.post(
         "/v1/client-registrations",
-        json={"org_name": "Demo Org", "contact_email": "demo@example.com"},
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo@example.com",
+            "room_id": "room_demo",
+            "room_password": "ChangeMe123!",
+        },
         headers=_headers("admin-token"),
     )
     reg_id = reg.json()["id"]
     client.post(
         f"/v1/client-registrations/{reg_id}/approve",
-        json={"client_id": "client_demo", "initial_room_id": "room_demo"},
+        json={"client_id": "client_demo"},
         headers=_headers("admin-token"),
     )
     out = client.post(
@@ -56,3 +66,14 @@ def test_socket_authorization(monkeypatch, tmp_path):
         headers=_headers("client-operator-token"),
     )
     assert out.status_code == 200
+    verify = client.post(
+        "/v1/socket/verify-room-secret",
+        params={
+            "client_id": "client_demo",
+            "room_id": "room_demo",
+            "room_secret": "ChangeMe123!",
+        },
+        headers=_headers("client-operator-token"),
+    )
+    assert verify.status_code == 200
+    assert verify.json()["authorized"] is True

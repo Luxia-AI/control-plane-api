@@ -16,11 +16,12 @@ router = APIRouter(prefix="/v1", tags=["control-plane"])
 class ClientRegistrationRequest(BaseModel):
     org_name: str = Field(min_length=2)
     contact_email: str
+    room_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,64}$")
+    room_password: str = Field(min_length=8, max_length=256)
 
 
 class ApproveRegistrationRequest(BaseModel):
     client_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,64}$")
-    initial_room_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{3,64}$")
 
 
 class ConfigPatchRequest(BaseModel):
@@ -55,13 +56,26 @@ ALLOWED_CONFIG_KEYS = {
 def create_registration(payload: ClientRegistrationRequest, principal: Principal = Depends(get_principal)) -> dict[str, Any]:
     reg_id = str(uuid.uuid4())
     now = utc_now()
+    salt = uuid.uuid4().hex[:32]
+    room_secret_hash = hash_secret(payload.room_password, salt)
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO client_registrations (id, org_name, contact_email, status, requested_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (reg_id, payload.org_name, payload.contact_email, "pending", principal.sub, now, now),
+            "INSERT INTO client_registrations (id, org_name, contact_email, requested_room_id, requested_room_salt, requested_room_secret_hash, status, requested_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                reg_id,
+                payload.org_name,
+                payload.contact_email,
+                payload.room_id,
+                salt,
+                room_secret_hash,
+                "pending",
+                principal.sub,
+                now,
+                now,
+            ),
         )
     write_audit(principal, "client_registration_created", "client_registration", reg_id, payload.model_dump())
-    return {"id": reg_id, "status": "pending"}
+    return {"id": reg_id, "status": "pending", "room_id": payload.room_id}
 
 
 @router.post("/client-registrations/{registration_id}/approve")
@@ -69,21 +83,37 @@ def approve_registration(registration_id: str, payload: ApproveRegistrationReque
     require_role(principal, {"platform_admin"})
     now = utc_now()
     with get_conn() as conn:
-        row = conn.execute("SELECT id, status, org_name FROM client_registrations WHERE id=?", (registration_id,)).fetchone()
+        row = conn.execute(
+            "SELECT id, status, org_name, requested_room_id, requested_room_salt, requested_room_secret_hash FROM client_registrations WHERE id=?",
+            (registration_id,),
+        ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="registration not found")
         if row["status"] != "pending":
             raise HTTPException(status_code=409, detail="registration already processed")
+        requested_room_id = str(row["requested_room_id"] or "").strip()
+        requested_room_salt = str(row["requested_room_salt"] or "").strip()
+        requested_room_secret_hash = str(row["requested_room_secret_hash"] or "").strip()
+        if not requested_room_id or not requested_room_salt or not requested_room_secret_hash:
+            raise HTTPException(status_code=400, detail="registration missing room credentials")
 
         conn.execute(
             "INSERT INTO client_orgs (client_id, org_name, status, created_at) VALUES (?, ?, ?, ?)",
             (payload.client_id, row["org_name"], "active", now),
         )
-        conn.execute("INSERT INTO rooms (room_id, client_id, created_at) VALUES (?, ?, ?)", (payload.initial_room_id, payload.client_id, now))
-        secret, salt, secret_hash = issue_room_secret()
+        conn.execute(
+            "INSERT INTO rooms (room_id, client_id, created_at) VALUES (?, ?, ?)",
+            (requested_room_id, payload.client_id, now),
+        )
         conn.execute(
             "INSERT INTO room_credentials (id, room_id, salt, secret_hash, active, rotated_at) VALUES (?, ?, ?, ?, 1, ?)",
-            (str(uuid.uuid4()), payload.initial_room_id, salt, secret_hash, now),
+            (
+                str(uuid.uuid4()),
+                requested_room_id,
+                requested_room_salt,
+                requested_room_secret_hash,
+                now,
+            ),
         )
         conn.execute("UPDATE client_registrations SET status='approved', updated_at=? WHERE id=?", (now, registration_id))
 
@@ -91,9 +121,9 @@ def approve_registration(registration_id: str, payload: ApproveRegistrationReque
     return {
         "registration_id": registration_id,
         "client_id": payload.client_id,
-        "room_id": payload.initial_room_id,
-        "room_secret": secret,
-        "warning": "Store this secret now; it will not be returned again.",
+        "room_id": requested_room_id,
+        "status": "approved",
+        "message": "Registration approved. Client can now join this room using the submitted room password.",
     }
 
 
