@@ -140,3 +140,124 @@ def test_admin_can_list_pending_registrations(monkeypatch, tmp_path):
     assert len(items) == 1
     assert items[0]["requested_room_id"] == "pending-room"
     assert items[0]["requested_by"] == "self_service"
+
+
+def test_approve_second_room_for_same_client_succeeds(monkeypatch, tmp_path):
+    monkeypatch.setattr(db_service, "DB_PATH", str(tmp_path / "cp_second_room.db"))
+    db_service.init_db()
+    client = TestClient(app)
+
+    reg_one = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo1@example.com",
+            "room_id": "room-one",
+            "room_password": "ChangeMe123!",
+        },
+    )
+    reg_two = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo2@example.com",
+            "room_id": "room-two",
+            "room_password": "ChangeMe123!",
+        },
+    )
+
+    out_one = client.post(
+        f"/v1/client-registrations/{reg_one.json()['id']}/approve",
+        json={"client_id": "client_demo"},
+        headers=_headers("admin-token"),
+    )
+    out_two = client.post(
+        f"/v1/client-registrations/{reg_two.json()['id']}/approve",
+        json={"client_id": "client_demo"},
+        headers=_headers("admin-token"),
+    )
+
+    assert out_one.status_code == 200
+    assert out_two.status_code == 200
+    assert out_two.json()["room_id"] == "room-two"
+
+
+def test_approve_registration_rejects_duplicate_room_id(monkeypatch, tmp_path):
+    monkeypatch.setattr(db_service, "DB_PATH", str(tmp_path / "cp_dup_room.db"))
+    db_service.init_db()
+    client = TestClient(app)
+
+    reg_one = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo1@example.com",
+            "room_id": "room-same",
+            "room_password": "ChangeMe123!",
+        },
+    )
+    reg_two = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Demo Org",
+            "contact_email": "demo2@example.com",
+            "room_id": "room-same",
+            "room_password": "ChangeMe123!",
+        },
+    )
+
+    out_one = client.post(
+        f"/v1/client-registrations/{reg_one.json()['id']}/approve",
+        json={"client_id": "client_demo"},
+        headers=_headers("admin-token"),
+    )
+    out_two = client.post(
+        f"/v1/client-registrations/{reg_two.json()['id']}/approve",
+        json={"client_id": "client_demo"},
+        headers=_headers("admin-token"),
+    )
+
+    assert out_one.status_code == 200
+    assert out_two.status_code == 409
+    assert out_two.json()["detail"] == "room already exists"
+
+
+def test_approve_different_clients_and_rooms_succeeds(monkeypatch, tmp_path):
+    monkeypatch.setattr(db_service, "DB_PATH", str(tmp_path / "cp_multi_client.db"))
+    db_service.init_db()
+    client = TestClient(app)
+
+    reg_a = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Org A",
+            "contact_email": "a@example.com",
+            "room_id": "room-a",
+            "room_password": "ChangeMe123!",
+        },
+    )
+    reg_b = client.post(
+        "/v1/client-registrations",
+        json={
+            "org_name": "Org B",
+            "contact_email": "b@example.com",
+            "room_id": "room-b",
+            "room_password": "ChangeMe123!",
+        },
+    )
+
+    out_a = client.post(
+        f"/v1/client-registrations/{reg_a.json()['id']}/approve",
+        json={"client_id": "client_a"},
+        headers=_headers("admin-token"),
+    )
+    out_b = client.post(
+        f"/v1/client-registrations/{reg_b.json()['id']}/approve",
+        json={"client_id": "client_b"},
+        headers=_headers("admin-token"),
+    )
+
+    assert out_a.status_code == 200
+    assert out_b.status_code == 200
+    assert out_a.json()["client_id"] == "client_a"
+    assert out_b.json()["client_id"] == "client_b"

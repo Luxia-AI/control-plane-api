@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import uuid
 from typing import Any
 
@@ -108,10 +109,28 @@ def approve_registration(registration_id: str, payload: ApproveRegistrationReque
         if not requested_room_id or not requested_room_salt or not requested_room_secret_hash:
             raise HTTPException(status_code=400, detail="registration missing room credentials")
 
-        conn.execute(
-            "INSERT INTO client_orgs (client_id, org_name, status, created_at) VALUES (?, ?, ?, ?)",
-            (payload.client_id, row["org_name"], "active", now),
-        )
+        existing_room = conn.execute(
+            "SELECT room_id, client_id FROM rooms WHERE room_id=?",
+            (requested_room_id,),
+        ).fetchone()
+        if existing_room:
+            raise HTTPException(status_code=409, detail="room already exists")
+
+        existing_org = conn.execute(
+            "SELECT client_id FROM client_orgs WHERE client_id=?",
+            (payload.client_id,),
+        ).fetchone()
+        if not existing_org:
+            try:
+                conn.execute(
+                    "INSERT INTO client_orgs (client_id, org_name, status, created_at) VALUES (?, ?, ?, ?)",
+                    (payload.client_id, row["org_name"], "active", now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="client_id already exists",
+                ) from exc
         conn.execute(
             "INSERT INTO rooms (room_id, client_id, created_at) VALUES (?, ?, ?)",
             (requested_room_id, payload.client_id, now),
